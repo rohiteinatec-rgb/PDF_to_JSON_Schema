@@ -24,16 +24,32 @@ This project extracts raw text from invoice PDFs and saves it as plain text file
 3. Output will be saved in the `output/` directory with the same name as the PDF file.
 
 ## Project Structure
-- `pipeline/detector.py`: Main script for PDF text extraction
-- `input/`: Place your PDF files here
-- `output/`: Extracted text files are saved here
+
+```
+PDF_to_JSON_Schema/
+├── input/                # Place your PDF files here
+│   ├── digital_invoice_test.pdf
+│   └── dummy.pdf
+├── output/               # Extracted text files are saved here
+├── pipeline/
+│   ├── detector.py       # Main script for PDF text extraction
+│   └── output/
+│       ├── digital_invoice_test.txt
+│       └── dummy.txt
+├── README.md
+└── ... (other project files)
+```
+
+- `input/`: Folder for input PDF files.
+- `output/`: Folder for extracted text files (created by the script).
+- `pipeline/`: Contains the main extraction script and output subfolder.
 
 ## Example
 See `pipeline/output/digital_invoice_test.txt` for a sample output.
 
 ## License
-MIT License
+Einatec License
 
 ## Author
-Your Name
+Einatec Team
 
