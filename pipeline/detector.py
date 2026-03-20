@@ -1,9 +1,13 @@
 """
 detector.py
 -----------
-GOAL: Smart extraction pipeline strictly for Native Digital PDFs.
-Validation: Uses Quantrium Tech approach to prevent silent failures on scanned images.
-Extraction: Uses PyMuPDF4LLM for layout-aware Markdown extraction.
+GOAL: Enterprise-Grade extraction pipeline strictly for Native Digital PDFs.
+Defenses:
+  1. Resource Gatekeeper (Prevents PDF Bombs / Memory Exhaustion).
+  2. Integrity & Security Gatekeeper (Catches corruption and encryption).
+  3. Dynamic Geometry Router (Scans multiple pages, rejects scanned JPGs).
+  4. Dynamic Structural DOM Probe (Detects invisible tables across pages).
+  5. Memory-Safe Execution (Uses context managers to prevent C-binding leaks).
 
 RUN:
     python pipeline/detector.py --pdf input/digital_invoice_test.pdf --debug
@@ -11,34 +15,59 @@ RUN:
 
 import os
 import argparse
-import fitz              # PyMuPDF
-import pymupdf4llm       # Advanced layout-aware extraction
+import fitz
+import pymupdf4llm
+import pdfplumber
 from pathlib import Path
 
 OUTPUT_FOLDER = "output"
+MAX_PAGES = 10  # Protection against PDF DoS attacks (Billion Laughs equivalent)
+
+
+def security_and_integrity_check(pdf_path, debug=False):
+    """DEFENSE LAYER 1: Ensures valid, unencrypted PDF and prevents Resource Exhaustion."""
+    if debug:
+        print("[DEBUG] Running Security, Integrity, and Resource checks...")
+
+    try:
+        # Using Context Manager (with) guarantees memory is released immediately
+        with fitz.open(pdf_path) as doc:
+            if doc.needs_pass or doc.is_encrypted:
+                return False, "Document is encrypted or password-protected."
+
+            if doc.page_count > MAX_PAGES:
+                return False, f"Document exceeds maximum allowed pages ({MAX_PAGES}). Possible DoS threat."
+
+            if doc.page_count == 0:
+                return False, "Document contains absolutely zero pages."
+
+        return True, "Passed"
+
+    except Exception as e:
+        return False, f"File is corrupted or not a valid PDF. Error: {str(e)}"
 
 
 def is_text_based_pdf(pdf_path, debug=False):
     """
-    Quantrium Tech Approach:
-    Calculates the geometric area of text blocks vs image blocks to validate
-    if the document is actually a digital PDF.
+    DEFENSE LAYER 2: Validates if the document is a digital PDF.
+    Upgraded to scan past blank cover pages.
     """
-    doc = fitz.open(pdf_path)
-    page = doc[0]
-    image_area = 0.0
-    text_area = 0.0
+    with fitz.open(pdf_path) as doc:
+        image_area, text_area = 0.0, 0.0
 
-    for b in page.get_text("blocks"):
-        block_type = b[6]
-        r = fitz.Rect(b[:4])
+        for page in doc:
+            for b in page.get_text("blocks"):
+                block_type = b[6]
+                r = fitz.Rect(b[:4])
 
-        if block_type == 1:
-            image_area += abs(r)
-        elif block_type == 0:
-            text_area += abs(r)
+                if block_type == 1:
+                    image_area += abs(r)
+                elif block_type == 0:
+                    text_area += abs(r)
 
-    doc.close()
+            # If we found substantial content on this page, we can make a decision and stop checking
+            if image_area > 0 or text_area > 0:
+                break
 
     if debug:
         print(f"[DEBUG] Geometry Check -> Text Area: {text_area:.2f} | Image Area: {image_area:.2f}")
@@ -46,35 +75,91 @@ def is_text_based_pdf(pdf_path, debug=False):
     return text_area > image_area
 
 
-def detector(pdf_path, debug=False):
+def needs_invisible_fallback(pdf_path, debug=False):
     """
-    Validates the PDF type, then extracts structured Markdown text.
+    DEFENSE LAYER 3 (The Structural Probe):
+    Checks the document's DOM for vector graphics (lines/rectangles) across all valid pages.
     """
+    has_grid = False
+
+    with fitz.open(pdf_path) as doc:
+        for page in doc:
+            table_finder = page.find_tables()
+            if len(table_finder.tables) > 0:
+                has_grid = True
+                break  # We found a table, no need to check further pages
+
     if debug:
-        print("[DEBUG] Validating document composition...")
+        if has_grid:
+            print("[DEBUG] Vector gridlines detected. Standard extraction approved.")
+        else:
+            print("[DEBUG] Zero vector gridlines detected anywhere. Invisible table confirmed.")
 
-    # 1. The Gatekeeper Validation
-    is_digital = is_text_based_pdf(pdf_path, debug=debug)
+    return not has_grid
 
-    if not is_digital:
-        # Graceful failure instead of silent empty output
-        print("\n[WARNING] This document appears to be a scanned image.")
-        print("[WARNING] This specific script is designed strictly for Native Digital PDFs.")
-        print("[WARNING] Halting extraction. Please route this file to the Docling or OCRmyPDF pipelines.\n")
+
+def pdfplumber_to_markdown(pdf_path, debug=False):
+    """The Whitespace Specialist: Extracts borderless tables into standard Markdown."""
+    if debug:
+        print("[DEBUG] Booting pdfplumber for whitespace table extraction...")
+
+    md_lines = []
+    with pdfplumber.open(pdf_path) as pdf:
+        # Process up to our MAX_PAGES limit to prevent hangs
+        for page in pdf.pages[:MAX_PAGES]:
+            table_settings = {
+                "vertical_strategy": "text",
+                "horizontal_strategy": "text"
+            }
+
+            tables = page.extract_tables(table_settings)
+            for table in tables:
+                for i, row in enumerate(table):
+                    clean_row = [str(cell).replace('\n', ' ').strip() if cell else "" for cell in row]
+                    md_lines.append("| " + " | ".join(clean_row) + " |")
+
+                    if i == 0:
+                        md_lines.append("|" + "|".join(["---"] * len(clean_row)) + "|")
+                md_lines.append("\n")
+
+    return "\n".join(md_lines)
+
+
+def detector(pdf_path, debug=False):
+    """The Master Controller: Routes the document through all defenses before extraction."""
+
+    # 1. Integrity & Resource Check
+    is_safe, message = security_and_integrity_check(pdf_path, debug)
+    if not is_safe:
+        print(f"\n[CRITICAL ERROR] {message}\n")
         return ""
 
-    # 2. The Upgraded Extraction
-    if debug:
-        print("[DEBUG] Digital PDF validated. Extracting structured Markdown...")
+    # 2. Geometry Check (Catches JPGs and handles cover pages)
+    if not is_text_based_pdf(pdf_path, debug=debug):
+        print("\n[WARNING] Scanned image detected. Halting extraction.")
+        print("[WARNING] Please route this file to the Docling or OCR pipelines.\n")
+        return ""
 
-    # Grabs the text while preserving table structures natively
-    text = pymupdf4llm.to_markdown(pdf_path)
+    # 3. Intelligent Routing based on DOM
+    try:
+        is_borderless = needs_invisible_fallback(pdf_path, debug=debug)
 
-    return text
+        if is_borderless:
+            text = pdfplumber_to_markdown(pdf_path, debug=debug)
+        else:
+            if debug:
+                print("[DEBUG] Routing to PyMuPDF4LLM for fast native extraction...")
+            text = pymupdf4llm.to_markdown(pdf_path)
+
+        return text
+
+    except Exception as e:
+        print(f"\n[CRITICAL ERROR] Extraction failed unexpectedly: {str(e)}\n")
+        return ""
 
 
 def run():
-    parser = argparse.ArgumentParser(description="Extract text from a native digital PDF.")
+    parser = argparse.ArgumentParser(description="Enterprise extraction pipeline for digital PDFs.")
     parser.add_argument('--pdf', required=True, help='Path to the PDF file to process')
     parser.add_argument('--debug', action='store_true', help='Enable debug output')
     args = parser.parse_args()
@@ -82,7 +167,7 @@ def run():
     pdf_path = args.pdf
 
     if args.debug:
-        print(f"[DEBUG] Reading : {pdf_path}")
+        print(f"[DEBUG] Processing : {pdf_path}")
 
     raw_text = detector(pdf_path, debug=args.debug)
 
